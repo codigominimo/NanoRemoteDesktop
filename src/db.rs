@@ -165,6 +165,10 @@ impl Db {
                 username TEXT,
                 notes TEXT,
                 created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );",
         )?;
 
@@ -493,9 +497,22 @@ impl Db {
             "DELETE FROM service_checks WHERE checked_at < ?1",
             params![cutoff],
         )?;
-        // Reclaim pages without blocking vacuum; helps keep file small.
         let _ = conn.execute_batch("PRAGMA incremental_vacuum(200);");
         Ok(changed)
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        conn.query_row("SELECT value FROM settings WHERE key=?1", params![key], |r| r.get(0)).optional()
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
     }
 
     pub fn list_remote_connections(&self) -> Result<Vec<RemoteConnection>> {

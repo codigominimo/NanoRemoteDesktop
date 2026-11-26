@@ -5,7 +5,7 @@ use crate::deploy::{self, DeployRequest};
 use crate::monitor;
 use crate::services::ServiceManager;
 use crate::templates::{
-    self, DashboardTemplate, DeployTemplate, LoginTemplate, RemoteTemplate,
+    self, ConfigTemplate, DashboardTemplate, DeployTemplate, LoginTemplate, RemoteTemplate,
     ServicesFragmentTemplate, ServicesTemplate, SystemTemplate,
 };
 use askama::Template;
@@ -35,17 +35,11 @@ pub fn serve(
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let server = build_server(&config)?;
-    let scheme = if config.tls_cert.is_some() {
-        "https"
-    } else {
-        "http"
-    };
+    let scheme = if config.tls_cert.is_some() { "https" } else { "http" };
     eprintln!("NanoRemoteDesktop listening on {scheme}://{}", config.bind);
 
     let heartbeat_secs = config.heartbeat_secs;
-    let username = config.username.clone();
-    let password = config.password.clone();
-    let config = Arc::new(config);
+    let config = Arc::new(std::sync::Mutex::new(config));
     let sessions = Arc::new(Sessions::new());
 
     while !stop.load(Ordering::Relaxed) {
@@ -72,10 +66,12 @@ pub fn serve(
             .map(|h| h.value.as_str())
             .map(|s| s.to_string());
 
+        let expected_user = config.lock().expect("config mutex").username.clone();
+        let expected_pass = db.get_setting("admin_password_hash").ok().flatten().unwrap_or_else(|| "plain:Gestion!".to_string());
         let has_session = cookie_token(cookie_header.as_deref(), SESSION_COOKIE)
             .map(|t| sessions.verify(&t))
             .unwrap_or(false);
-        let has_basic = check_basic_auth(auth_header.as_deref(), &username, &password);
+        let has_basic = check_basic_auth(auth_header.as_deref(), &expected_user, &expected_pass);
         let authenticated = has_session || has_basic;
 
         // Public routes
@@ -94,7 +90,7 @@ pub fn serve(
             let form = parse_form(&body);
             let user = form.get("username").cloned().unwrap_or_default();
             let pass = form.get("password").cloned().unwrap_or_default();
-            if !check_credentials(&user, &pass, &username, &password) {
+            if !check_credentials(&user, &pass, &expected_user, &expected_pass) {
                 let _ = request.respond(render_login(&user, "Credenciales inválidas"));
                 continue;
             }
@@ -120,7 +116,7 @@ pub fn serve(
                     continue;
                 }
             };
-            if !check_credentials(&body.username, &body.password, &username, &password) {
+            if !check_credentials(&body.username, &body.password, &expected_user, &expected_pass) {
                 let _ = request.respond(json_response(
                     401,
                     &serde_json::json!({"error":"invalid credentials"}),
@@ -178,11 +174,13 @@ pub fn serve(
         }
 
         if method == Method::Get && path == "/ws/remote" {
-            crate::remote::handle_ws_remote(request, &sessions, &config);
+            let cfg = config.lock().expect("config mutex").clone();
+            crate::remote::handle_ws_remote(request, &sessions, &Arc::new(cfg));
             continue;
         }
         if method == Method::Get && path == "/ws/terminal" {
-            crate::remote::handle_ws_terminal(request, &sessions, &config);
+            let cfg = config.lock().expect("config mutex").clone();
+            crate::remote::handle_ws_terminal(request, &sessions, &Arc::new(cfg));
             continue;
         }
 
@@ -210,7 +208,7 @@ fn handle(
     request: &mut tiny_http::Request,
     db: &Arc<Db>,
     manager: &Arc<dyn ServiceManager>,
-    config: &Arc<Config>,
+    config: &Arc<std::sync::Mutex<Config>>,
     heartbeat_secs: i64,
 ) -> Result<Response<std::io::Cursor<Vec<u8>>>, (u16, String)> {
     let path = url.split('?').next().unwrap_or(url);
@@ -280,6 +278,76 @@ fn handle(
         return Ok(html_response(&html));
     }
 
+    if method == &Method::Get && path == "/config" {
+        let (catalog_repo, catalog_branch) = {
+            let c = config.lock().expect("config mutex");
+            (c.catalog_repo.clone(), c.catalog_branch.clone())
+        };
+        let html = ConfigTemplate {
+            active_tab: "config",
+            catalog_repo: &catalog_repo,
+            catalog_branch: &catalog_branch,
+            version: env!("CARGO_PKG_VERSION"),
+        }
+        .render()
+        .map_err(|e| internal(e))?;
+        return Ok(html_response(&html));
+    }
+
+    if method == &Method::Post && path == "/api/config/password" {
+        #[derive(Deserialize)]
+        struct Req { current_password: String, new_password: String }
+        let req: Req = read_json(request)?;
+        if req.new_password.trim().is_empty() { return Err((400, "new password is required".to_string())); }
+        let username = config.lock().expect("config mutex").username.clone();
+        let current_hash = db.get_setting("admin_password_hash").ok().flatten().unwrap_or_else(|| "plain:Gestion!".to_string());
+        if !crate::auth::check_credentials(&username, &req.current_password, &username, &current_hash) {
+            return Err((401, "current password is invalid".to_string()));
+        }
+        let hash = crate::auth::hash_password(&req.new_password);
+        db.set_setting("admin_password_hash", &hash).map_err(internal)?;
+        return Ok(json_ok(&serde_json::json!({"ok": true})));
+    }
+
+    if method == &Method::Post && path == "/api/config/catalog" {
+        #[derive(Deserialize)]
+        struct Req { repo: String, branch: String }
+        let req: Req = read_json(request)?;
+        let mut c = config.lock().expect("config mutex");
+        if !req.repo.trim().is_empty() { c.catalog_repo = req.repo.trim().to_string(); }
+        if !req.branch.trim().is_empty() { c.catalog_branch = req.branch.trim().to_string(); }
+        c.save_current().map_err(internal)?;
+        return Ok(json_ok(&serde_json::json!({"ok": true, "repo": c.catalog_repo, "branch": c.catalog_branch})));
+    }
+
+    if method == &Method::Get && path == "/api/catalog" {
+        let (repo, branch) = { let c = config.lock().expect("config mutex"); (c.catalog_repo.clone(), c.catalog_branch.clone()) };
+        let catalog = fetch_catalog(&repo, &branch).map_err(bad_request)?;
+        return Ok(json_ok(&catalog));
+    }
+
+    if method == &Method::Post && path == "/api/catalog/install" {
+        #[derive(Deserialize)]
+        struct Req { kind: Option<String>, item: serde_json::Value }
+        let req: Req = read_json(request)?;
+        let kind = req.kind.unwrap_or_else(|| "app".to_string());
+        let cfg = config.lock().expect("config mutex").clone();
+        let result = install_catalog_item(&cfg, db, manager, heartbeat_secs, &kind, &req.item).map_err(bad_request)?;
+        return Ok(json_ok(&result));
+    }
+
+    if method == &Method::Get && path == "/api/update/check" {
+        let (repo, _branch) = { let c = config.lock().expect("config mutex"); (c.catalog_repo.clone(), c.catalog_branch.clone()) };
+        let info = check_update(&repo).map_err(bad_request)?;
+        return Ok(json_ok(&info));
+    }
+
+    if method == &Method::Post && path == "/api/update/apply" {
+        let (repo, _) = { let c = config.lock().expect("config mutex"); (c.catalog_repo.clone(), c.catalog_branch.clone()) };
+        let info = apply_update(&repo).map_err(bad_request)?;
+        return Ok(json_ok(&info));
+    }
+
     if method == &Method::Get && path == "/fragments/services" {
         let services = db.list_services_with_status().map_err(internal)?;
         let rows = templates::build_service_rows(&services);
@@ -343,7 +411,8 @@ fn handle(
 
     if method == &Method::Post && path == "/api/deploy" {
         let req: DeployRequest = read_json(request)?;
-        let res = deploy::deploy_new(config, db, req).map_err(bad_request)?;
+        let cfg = config.lock().expect("config mutex").clone();
+        let res = deploy::deploy_new(&cfg, db, req).map_err(bad_request)?;
         let _ = monitor::check_now(db, manager, res.service_id, heartbeat_secs);
         return Ok(json_response(
             201,
@@ -361,7 +430,8 @@ fn handle(
     if let Some(id) = parse_id(path, "/api/services/", "/redeploy") {
         if method == &Method::Post {
             let req: deploy::RedeployRequest = read_json(request)?;
-            let res = deploy::redeploy(config, db, manager, id, req).map_err(bad_request)?;
+            let cfg = config.lock().expect("config mutex").clone();
+            let res = deploy::redeploy(&cfg, db, manager, id, req).map_err(bad_request)?;
             let _ = monitor::check_now(db, manager, res.service_id, heartbeat_secs);
             return Ok(json_ok(&serde_json::json!({
                 "ok": true,
@@ -679,4 +749,196 @@ fn serve_static(path: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     resp.add_header(Header::from_bytes(&b"Content-Type"[..], ct.as_bytes()).unwrap());
     resp.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=86400"[..]).unwrap());
     resp
+}
+
+fn http_get_text(url: &str) -> Result<String, String> {
+    // Minimal no-dep HTTP(S) GET via system tools.
+    #[cfg(target_os = "windows")]
+    {
+        let out = std::process::Command::new("curl.exe")
+            .args(["-fsSL", "-H", "User-Agent: NanoRemoteDesktop", url])
+            .output();
+        if let Ok(o) = out {
+            if o.status.success() { return String::from_utf8(o.stdout).map_err(|e| e.to_string()); }
+        }
+        let ps = format!("Invoke-WebRequest -UseBasicParsing -Headers @{{'User-Agent'='NanoRemoteDesktop'}} -Uri '{}' | Select-Object -ExpandProperty Content", url.replace("'", "''"));
+        let o = std::process::Command::new("powershell").args(["-NoProfile","-Command",&ps]).output().map_err(|e| format!("http get: {e}"))?;
+        if o.status.success() { return String::from_utf8(o.stdout).map_err(|e| e.to_string()); }
+        Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        for (cmd, args) in [
+            ("curl", vec!["-fsSL","-H","User-Agent: NanoRemoteDesktop", url]),
+            ("wget", vec!["-qO-","--header=User-Agent: NanoRemoteDesktop", url]),
+        ] {
+            if let Ok(o) = std::process::Command::new(cmd).args(&args).output() {
+                if o.status.success() { return String::from_utf8(o.stdout).map_err(|e| e.to_string()); }
+            }
+        }
+        Err("No se pudo descargar (se necesita curl o wget)".to_string())
+    }
+}
+
+fn http_download_file(url: &str, dest: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let dest_s = dest.to_string_lossy().to_string();
+        let out = std::process::Command::new("curl.exe")
+            .args(["-fsSL","-H","User-Agent: NanoRemoteDesktop", url, "-o", &dest_s])
+            .output();
+        if let Ok(o) = out { if o.status.success() { return Ok(()); } }
+        let ps = format!("Invoke-WebRequest -UseBasicParsing -Headers @{{'User-Agent'='NanoRemoteDesktop'}} -Uri '{}' -OutFile '{}'", url.replace("'","''"), dest_s.replace("'","''"));
+        let o = std::process::Command::new("powershell").args(["-NoProfile","-Command",&ps]).output().map_err(|e| format!("download: {e}"))?;
+        if o.status.success() { return Ok(()); }
+        return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let dest_s = dest.to_string_lossy().to_string();
+        for (cmd, args) in [
+            ("curl", vec!["-fsSL","-H","User-Agent: NanoRemoteDesktop", url, "-o", &dest_s]),
+            ("wget", vec!["-q","--header=User-Agent: NanoRemoteDesktop", "-O", &dest_s, url]),
+        ] {
+            if let Ok(o) = std::process::Command::new(cmd).args(&args).output() {
+                if o.status.success() { return Ok(()); }
+            }
+        }
+        Err("No se pudo descargar (se necesita curl o wget)".to_string())
+    }
+}
+
+fn normalize_catalog_item(v: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "imagen": v.get("imagen").and_then(|x| x.as_str()).unwrap_or(""),
+        "nombre": v.get("nombre").and_then(|x| x.as_str()).unwrap_or(""),
+        "descripcion": v.get("descripcion").and_then(|x| x.as_str()).unwrap_or(""),
+        "urldescarga": v.get("urldescarga").and_then(|x| x.as_str()).unwrap_or(""),
+        "despliegue": v.get("despliegue").cloned().unwrap_or(serde_json::json!({}))
+    })
+}
+
+fn fetch_catalog(repo: &str, branch: &str) -> Result<serde_json::Value, String> {
+    let repo = repo.trim().trim_matches('/');
+    let branch = branch.trim();
+    if repo.is_empty() { return Err("repo is required".to_string()); }
+    let base = format!("https://raw.githubusercontent.com/{repo}/{branch}/remote-info");
+    let apps_txt = http_get_text(&format!("{base}/apps.json")).unwrap_or_else(|_| "[]".to_string());
+    let svcs_txt = http_get_text(&format!("{base}/services.json")).unwrap_or_else(|_| "[]".to_string());
+    let apps_raw: serde_json::Value = serde_json::from_str(&apps_txt).unwrap_or(serde_json::json!([]));
+    let svcs_raw: serde_json::Value = serde_json::from_str(&svcs_txt).unwrap_or(serde_json::json!([]));
+    let map_items = |v: serde_json::Value| -> serde_json::Value {
+        match v {
+            serde_json::Value::Array(a) => serde_json::Value::Array(a.iter().map(normalize_catalog_item).collect()),
+            _ => serde_json::json!([]),
+        }
+    };
+    Ok(serde_json::json!({"repo": repo, "branch": branch, "apps": map_items(apps_raw), "services": map_items(svcs_raw)}))
+}
+
+fn install_catalog_item(config: &Config, db: &Arc<Db>, manager: &Arc<dyn ServiceManager>, heartbeat_secs: i64, kind: &str, item: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let nombre = item.get("nombre").and_then(|x| x.as_str()).unwrap_or("catalog-item").trim();
+    let urldescarga = item.get("urldescarga").and_then(|x| x.as_str()).unwrap_or("").trim();
+    if urldescarga.is_empty() { return Err("urldescarga is required".to_string()); }
+    let despliegue = item.get("despliegue").cloned().unwrap_or(serde_json::json!({}));
+    let executable = despliegue.get("executable").and_then(|x| x.as_str()).unwrap_or("").trim();
+    let install_cmd = despliegue.get("install_cmd").and_then(|x| x.as_str()).map(str::trim).filter(|s| !s.is_empty());
+    let service_name = despliegue.get("name").and_then(|x| x.as_str()).map(str::trim).filter(|s| !s.is_empty()).unwrap_or(nombre);
+
+    let safe = nombre.chars().map(|c| if c.is_ascii_alphanumeric() || c=='-' || c=='_' { c } else { '_' }).collect::<String>();
+    let dir = config.data_dir.join("catalog").join(if safe.is_empty() { "item".to_string() } else { safe });
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create dir: {e}"))?;
+    let file_name = urldescarga.split('/').last().filter(|s| !s.is_empty()).unwrap_or("download.bin");
+    let dest = dir.join(file_name);
+    http_download_file(urldescarga, &dest)?;
+
+    // If ZIP and deployment params present, deploy through existing deploy flow.
+    let is_zip = file_name.to_lowercase().ends_with(".zip") || urldescarga.to_lowercase().contains(".zip");
+    if is_zip && !executable.is_empty() {
+        let bytes = std::fs::read(&dest).map_err(|e| format!("read downloaded zip: {e}"))?;
+        let mut b64 = String::new();
+        // simple base64 encode
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut i = 0;
+        while i < bytes.len() {
+            let b0 = bytes[i] as u32; let b1 = *bytes.get(i+1).unwrap_or(&0) as u32; let b2 = *bytes.get(i+2).unwrap_or(&0) as u32;
+            let n = (b0<<16)|(b1<<8)|b2;
+            b64.push(T[((n>>18)&63) as usize] as char);
+            b64.push(T[((n>>12)&63) as usize] as char);
+            b64.push(if i+1 < bytes.len() { T[((n>>6)&63) as usize] as char } else { '=' });
+            b64.push(if i+2 < bytes.len() { T[(n&63) as usize] as char } else { '=' });
+            i += 3;
+        }
+        let req = crate::deploy::DeployRequest {
+            name: service_name.to_string(),
+            label: Some(nombre.to_string()),
+            executable: executable.to_string(),
+            install_cmd: install_cmd.map(|s| s.to_string()),
+            zip_base64: b64,
+            enabled: Some(true),
+        };
+        let res = crate::deploy::deploy_new(config, db, req).map_err(|e| format!("deploy: {e}"))?;
+        let _ = monitor::check_now(db, manager, res.service_id, heartbeat_secs);
+        return Ok(serde_json::json!({"ok": true, "kind": kind, "deployed": true, "service_id": res.service_id, "install_dir": res.install_dir}));
+    }
+
+    let _ = db.add_service(NewService { name: format!("catalog-{}", service_name), label: Some(format!("Catálogo: {nombre} ({kind})")), enabled: Some(false) });
+    Ok(serde_json::json!({"ok": true, "kind": kind, "deployed": false, "downloaded_to": dest, "note": "Descargado. Falta ZIP+parametros de despliegue para instalación automática."}))
+}
+
+fn check_update(repo: &str) -> Result<serde_json::Value, String> {
+    let repo = repo.trim().trim_matches('/');
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let body = http_get_text(&url)?;
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| format!("parse release: {e}"))?;
+    let tag = v.get("tag_name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let current = env!("CARGO_PKG_VERSION");
+    let asset = pick_release_asset(&v);
+    Ok(serde_json::json!({"current": current, "latest": tag, "has_update": !tag.is_empty() && tag.trim_start_matches('v') != current, "asset": asset, "release_url": v.get("html_url")}))
+}
+
+fn pick_release_asset(release: &serde_json::Value) -> Option<serde_json::Value> {
+    let assets = release.get("assets")?.as_array()?;
+    let prefer = if cfg!(target_os = "windows") { "windows" } else if cfg!(target_os = "linux") { "linux" } else { "" };
+    let mut best: Option<&serde_json::Value> = None;
+    for a in assets {
+        let name = a.get("name").and_then(|x| x.as_str()).unwrap_or("").to_lowercase();
+        if prefer.is_empty() || name.contains(prefer) { best = Some(a); if name.contains(prefer) { break; } }
+    }
+    let a = best?;
+    Some(serde_json::json!({"name": a.get("name"), "url": a.get("browser_download_url")}))
+}
+
+fn apply_update(repo: &str) -> Result<serde_json::Value, String> {
+    let info = check_update(repo)?;
+    let has = info.get("has_update").and_then(|x| x.as_bool()).unwrap_or(false);
+    if !has { return Ok(serde_json::json!({"ok": true, "message": "Ya estás en la última versión.", "info": info})); }
+    let asset_url = info.get("asset").and_then(|a| a.get("url")).and_then(|x| x.as_str()).ok_or("No se encontró un asset compatible en la release")?;
+    let asset_name = info.get("asset").and_then(|a| a.get("name")).and_then(|x| x.as_str()).unwrap_or("nanoremotedesktop-update");
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let parent = exe.parent().ok_or("no exe parent")?;
+    let download = parent.join(format!(".update-{asset_name}"));
+    http_download_file(asset_url, &download)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let old = parent.join("NanoRemoteDesktop.old.exe");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(&exe, &old).map_err(|e| format!("rename current exe: {e}"))?;
+        std::fs::rename(&download, &exe).map_err(|e| { let _ = std::fs::rename(&old, &exe); format!("place new exe: {e}") })?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let old = parent.join("NanoRemoteDesktop.old");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(&exe, &old).map_err(|e| format!("rename current: {e}"))?;
+        std::fs::rename(&download, &exe).map_err(|e| { let _ = std::fs::rename(&old, &exe); format!("place new: {e}") })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    Ok(serde_json::json!({"ok": true, "message": "Actualización descargada y aplicada. Reinicia NanoRemoteDesktop para usar la nueva versión.", "info": info}))
 }

@@ -12,10 +12,11 @@ pub struct Config {
     pub retention_days: i64,
     pub heartbeat_secs: i64,
     pub username: String,
-    pub password: String,
     pub config_path: Option<PathBuf>,
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
+    pub catalog_repo: String,
+    pub catalog_branch: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -27,9 +28,10 @@ struct FileConfig {
     retention_days: Option<i64>,
     heartbeat_secs: Option<i64>,
     username: Option<String>,
-    password: Option<String>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
+    catalog_repo: Option<String>,
+    catalog_branch: Option<String>,
 }
 
 impl Config {
@@ -85,10 +87,7 @@ impl Config {
             .ok()
             .or(file_cfg.username)
             .unwrap_or_else(|| "admin".to_string());
-        let mut password = env::var("NRD_PASS")
-            .ok()
-            .or(file_cfg.password)
-            .unwrap_or_else(|| "Gestion!".to_string());
+
         let mut tls_cert = env::var("NRD_TLS_CERT")
             .ok()
             .map(PathBuf::from)
@@ -97,6 +96,14 @@ impl Config {
             .ok()
             .map(PathBuf::from)
             .or(file_cfg.tls_key.map(PathBuf::from));
+        let mut catalog_repo = env::var("NRD_CATALOG_REPO")
+            .ok()
+            .or(file_cfg.catalog_repo)
+            .unwrap_or_else(|| "codigominimo/NanoRemoteDesktop".to_string());
+        let mut catalog_branch = env::var("NRD_CATALOG_BRANCH")
+            .ok()
+            .or(file_cfg.catalog_branch)
+            .unwrap_or_else(|| "main".to_string());
 
         // Second pass: CLI overrides
         let mut args = env::args().skip(1);
@@ -157,8 +164,12 @@ impl Config {
         if username.is_empty() {
             username = "admin".to_string();
         }
-        if password.is_empty() {
-            password = "Gestion!".to_string();
+
+        if catalog_repo.trim().is_empty() {
+            catalog_repo = "codigominimo/NanoRemoteDesktop".to_string();
+        }
+        if catalog_branch.trim().is_empty() {
+            catalog_branch = "main".to_string();
         }
 
         Self {
@@ -169,32 +180,16 @@ impl Config {
             retention_days,
             heartbeat_secs,
             username,
-            password,
             config_path,
             tls_cert,
             tls_key,
+            catalog_repo: catalog_repo.trim().to_string(),
+            catalog_branch: catalog_branch.trim().to_string(),
         }
     }
 
     pub fn save_to(&self, path: &Path) -> Result<(), String> {
-        let cfg = FileConfig {
-            bind: Some(self.bind.clone()),
-            db_path: Some(self.db_path.to_string_lossy().to_string()),
-            data_dir: Some(self.data_dir.to_string_lossy().to_string()),
-            check_interval_secs: Some(self.check_interval_secs),
-            retention_days: Some(self.retention_days),
-            heartbeat_secs: Some(self.heartbeat_secs),
-            username: Some(self.username.clone()),
-            password: Some(self.password.clone()),
-            tls_cert: self
-                .tls_cert
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            tls_key: self
-                .tls_key
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-        };
+        let cfg = self.to_file_config();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("create config dir: {e}"))?;
         }
@@ -202,6 +197,30 @@ impl Config {
         fs::write(path, data).map_err(|e| format!("write config {}: {e}", path.display()))?;
         set_private_permissions(path);
         Ok(())
+    }
+
+    pub fn save_current(&self) -> Result<(), String> {
+        let path = self
+            .config_path
+            .clone()
+            .unwrap_or_else(default_config_path);
+        self.save_to(&path)
+    }
+
+    fn to_file_config(&self) -> FileConfig {
+        FileConfig {
+            bind: Some(self.bind.clone()),
+            db_path: Some(self.db_path.to_string_lossy().to_string()),
+            data_dir: Some(self.data_dir.to_string_lossy().to_string()),
+            check_interval_secs: Some(self.check_interval_secs),
+            retention_days: Some(self.retention_days),
+            heartbeat_secs: Some(self.heartbeat_secs),
+            username: Some(self.username.clone()),
+            tls_cert: self.tls_cert.as_ref().map(|p| p.to_string_lossy().to_string()),
+            tls_key: self.tls_key.as_ref().map(|p| p.to_string_lossy().to_string()),
+            catalog_repo: Some(self.catalog_repo.clone()),
+            catalog_branch: Some(self.catalog_branch.clone()),
+        }
     }
 }
 

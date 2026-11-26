@@ -26,6 +26,10 @@ fn run(config: Config, stop: Arc<AtomicBool>) -> Result<(), String> {
         Db::open(&config.db_path)
             .map_err(|e| format!("db open {}: {e}", config.db_path.display()))?,
     );
+    // Seed default admin password into encrypted DB if missing.
+    if db.get_setting("admin_password_hash").ok().flatten().is_none() {
+        let _ = db.set_setting("admin_password_hash", "plain:Gestion!");
+    }
     let manager: Arc<dyn crate::services::ServiceManager> = Arc::from(create_manager());
 
     monitor::start_monitor(

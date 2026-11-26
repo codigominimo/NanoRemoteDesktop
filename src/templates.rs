@@ -36,6 +36,15 @@ pub struct DeployTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "config.html")]
+pub struct ConfigTemplate<'a> {
+    pub active_tab: &'static str,
+    pub catalog_repo: &'a str,
+    pub catalog_branch: &'a str,
+    pub version: &'a str,
+}
+
+#[derive(Template)]
 #[template(path = "remote.html")]
 pub struct RemoteTemplate {
     pub active_tab: &'static str,

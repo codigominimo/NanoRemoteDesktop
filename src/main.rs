@@ -81,6 +81,6 @@ fn print_help() {
     println!("  NRD_CONFIG              Config file path");
     println!("  NRD_TLS_CERT/NRD_TLS_KEY TLS PEM files; self-signed cert is generated if omitted");
     println!("  NRD_HEARTBEAT_SECS      Unchanged-status heartbeat seconds (default: 3600)");
-    println!("  NRD_USER                Basic auth user (default: admin)");
-    println!("  NRD_PASS                Basic auth password (default: Gestion!)");
+    println!("  NRD_CATALOG_REPO        GitHub repo owner/name for catalog/updates");
+    println!("  NRD_CATALOG_BRANCH      GitHub branch for catalog (default: main)");
 }

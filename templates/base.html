@@ -114,6 +114,7 @@
           <a class="tab{% if active_tab == "dashboard" %} active{% endif %}" href="/dashboard">Dashboard</a>
           <a class="tab{% if active_tab == "services" %} active{% endif %}" href="/services">Servicios</a>
           <a class="tab{% if active_tab == "remote" %} active{% endif %}" href="/remote">Escritorio remoto</a>
+          <a class="tab{% if active_tab == "config" %} active{% endif %}" href="/config">Configuración</a>
         </nav>
         <button class="ghost" onclick="refreshPage()">Refrescar</button>
         <form method="post" action="/logout" style="margin:0"><button class="ghost" type="submit">Salir</button></form>

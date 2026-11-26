@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}Configuración · NanoRemoteDesktop{% endblock %}
+{% block content %}
+<section class="panel">
+  <div class="panel-header"><h2 class="panel-title">Configuración</h2></div>
+  <div class="muted" style="margin-bottom:14px">Versión actual: <span class="mono">{{ version }}</span></div>
+
+  <div style="display:grid; gap:20px;">
+    <div>
+      <h3 style="margin:0 0 10px;font-size:14px">Cambiar contraseña de admin</h3>
+      <div class="row">
+        <label>Contraseña actual <input id="curPass" type="password"></label>
+        <label>Nueva contraseña <input id="newPass" type="password"></label>
+        <label>Repetir nueva <input id="newPass2" type="password"></label>
+        <button class="primary" onclick="changePassword()">Guardar</button>
+      </div>
+      <div id="passErr" class="err"></div>
+      <div id="passOk" class="muted" style="margin-top:8px"></div>
+    </div>
+
+    <div style="border-top:1px solid var(--border);padding-top:18px">
+      <h3 style="margin:0 0 10px;font-size:14px">Actualización</h3>
+      <div class="muted" style="margin-bottom:10px">Buscar y aplicar actualizaciones de NanoRemoteDesktop desde GitHub Releases.</div>
+      <div class="row">
+        <button class="primary" onclick="checkUpdate()">Buscar actualización</button>
+        <button onclick="applyUpdate()" id="applyUpdateBtn">Actualizar ahora</button>
+      </div>
+      <div id="updErr" class="err"></div>
+      <div id="updOut" class="muted" style="margin-top:8px;white-space:pre-wrap"></div>
+    </div>
+
+    <div style="border-top:1px solid var(--border);padding-top:18px">
+      <h3 style="margin:0 0 10px;font-size:14px">Catálogo de apps y servicios</h3>
+      <div class="muted" style="margin-bottom:10px">Conecta a los ficheros <span class="mono">remote-info/apps.json</span> y <span class="mono">remote-info/services.json</span> del repositorio.</div>
+      <div class="row">
+        <label>Repositorio (owner/repo) <input id="catalogRepo" type="text" value="{{ catalog_repo }}" style="min-width:280px"></label>
+        <label>Rama <input id="catalogBranch" type="text" value="{{ catalog_branch }}"></label>
+        <button onclick="saveCatalogCfg()">Guardar origen</button>
+        <button class="primary" onclick="loadCatalog()">Cargar catálogo</button>
+      </div>
+      <div id="catErr" class="err"></div>
+      <div class="row" style="margin-top:14px;gap:20px;align-items:flex-start">
+        <div style="flex:1;min-width:280px">
+          <div class="muted" style="margin-bottom:8px;font-weight:500">Apps</div>
+          <div id="appsList" class="muted">Sin cargar.</div>
+        </div>
+        <div style="flex:1;min-width:280px">
+          <div class="muted" style="margin-bottom:8px;font-weight:500">Servicios</div>
+          <div id="servicesList" class="muted">Sin cargar.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+async function changePassword() {
+  const current_password = document.getElementById('curPass').value;
+  const new_password = document.getElementById('newPass').value;
+  const new_password2 = document.getElementById('newPass2').value;
+  const err = document.getElementById('passErr'); const ok = document.getElementById('passOk');
+  err.textContent=''; ok.textContent='';
+  if (!current_password || !new_password) { err.textContent='Completa los campos.'; return; }
+  if (new_password !== new_password2) { err.textContent='Las contraseñas nuevas no coinciden.'; return; }
+  try {
+    await api('/api/config/password', {method:'POST', body:JSON.stringify({current_password, new_password})});
+    ok.textContent='Contraseña actualizada.';
+    document.getElementById('curPass').value=''; document.getElementById('newPass').value=''; document.getElementById('newPass2').value='';
+  } catch(e) { err.textContent = e.message; }
+}
+
+async function saveCatalogCfg() {
+  const repo = document.getElementById('catalogRepo').value.trim();
+  const branch = document.getElementById('catalogBranch').value.trim();
+  const err = document.getElementById('catErr'); err.textContent='';
+  try { await api('/api/config/catalog', {method:'POST', body:JSON.stringify({repo, branch})}); await loadCatalog(); }
+  catch(e){ err.textContent=e.message; }
+}
+
+function renderCatalogItem(item, kind) {
+  const name = esc(item.nombre || 'Sin nombre');
+  const desc = esc(item.descripcion || '');
+  const img = item.imagen || '';
+  const url = esc(item.urldescarga || '');
+  const payload = encodeURIComponent(JSON.stringify(item));
+  return `<div style="padding:10px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;background:var(--surface-3)">
+    <div style="display:flex;gap:10px;align-items:flex-start">
+      ${img ? `<div style="width:28px;height:28px;flex:0 0 28px">${img.startsWith('<svg') ? img : `<img src="${esc(img)}" alt="" style="width:28px;height:28px">`}</div>` : ''}
+      <div style="flex:1">
+        <div style="font-weight:500">${name}</div>
+        ${desc ? `<div class="muted" style="margin:4px 0 8px">${desc}</div>` : ''}
+        ${url ? `<button class="btn-sm primary" onclick="installCatalogItem('${kind}','${payload}')">Instalar</button>` : `<span class="muted">Sin URL de descarga</span>`}
+      </div>
+    </div>
+  </div>`;
+}
+
+async function loadCatalog() {
+  const err = document.getElementById('catErr'); err.textContent='';
+  try {
+    const data = await api('/api/catalog');
+    const apps = Array.isArray(data.apps) ? data.apps : [];
+    const svcs = Array.isArray(data.services) ? data.services : [];
+    document.getElementById('appsList').innerHTML = apps.length ? apps.map(i=>renderCatalogItem(i,'app')).join('') : '<div class="muted">No hay apps en el catálogo.</div>';
+    document.getElementById('servicesList').innerHTML = svcs.length ? svcs.map(i=>renderCatalogItem(i,'service')).join('') : '<div class="muted">No hay servicios en el catálogo.</div>';
+  } catch(e) { err.textContent = e.message; }
+}
+
+async function installCatalogItem(kind, payload) {
+  const err = document.getElementById('catErr'); err.textContent='';
+  try {
+    const item = JSON.parse(decodeURIComponent(payload));
+    await api('/api/catalog/install', {method:'POST', body:JSON.stringify({kind, item})});
+    err.style.color='var(--ok)'; err.textContent = `Instalación procesada para ${item.nombre || 'elemento'}.`; setTimeout(()=>{err.textContent=''; err.style.color='';}, 4000);
+  } catch(e) { err.textContent = e.message; err.style.color=''; }
+}
+
+async function checkUpdate() {
+  const err = document.getElementById('updErr'); const out = document.getElementById('updOut');
+  err.textContent=''; out.textContent='Buscando...';
+  try { const r = await api('/api/update/check'); out.textContent = JSON.stringify(r, null, 2); }
+  catch(e){ err.textContent=e.message; out.textContent=''; }
+}
+
+async function applyUpdate() {
+  const err = document.getElementById('updErr'); const out = document.getElementById('updOut');
+  err.textContent=''; out.textContent='Iniciando actualización...';
+  try { const r = await api('/api/update/apply', {method:'POST', body:'{}'}); out.textContent = JSON.stringify(r, null, 2); }
+  catch(e){ err.textContent=e.message; out.textContent=''; }
+}
+{% endblock %}
