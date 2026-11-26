@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NanoRemoteDesktop</title>
+  <style>
+    :root { --bg:#0f1720; --panel:#162231; --muted:#8ea0b5; --text:#e7eef6; --accent:#4da3ff; --ok:#2ecc71; --bad:#ff6b6b; --warn:#f0b429; --line:#243447; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background:linear-gradient(180deg,#0c141d,#101b29); color:var(--text); }
+    header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
+    h1 { margin:0; font-size:20px; letter-spacing:.3px; }
+    .sub { color:var(--muted); font-size:13px; }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; }
+    .tab { background:transparent; border:1px solid #355274; color:var(--muted); padding:8px 12px; border-radius:8px; cursor:pointer; font-weight:600; }
+    .tab.active { background:var(--accent); color:#08111b; border-color:var(--accent); }
+    main { max-width:1100px; margin:0 auto; padding:24px; display:grid; gap:20px; }
+    .panel { background:rgba(22,34,49,.92); border:1px solid var(--line); border-radius:12px; padding:18px; box-shadow:0 8px 24px rgba(0,0,0,.18); }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:end; }
+    label { display:flex; flex-direction:column; gap:6px; font-size:13px; color:var(--muted); }
+    input[type=text], input[type=file] { background:#0f1925; color:var(--text); border:1px solid #30465f; border-radius:8px; padding:10px 12px; min-width:180px; }
+    input:focus { outline:2px solid rgba(77,163,255,.35); border-color:var(--accent); }
+    button { background:#22364d; color:var(--text); border:1px solid #355274; padding:9px 12px; border-radius:8px; cursor:pointer; font-weight:600; }
+    button:hover { background:#29415c; }
+    button.primary { background:var(--accent); border-color:var(--accent); color:#08111b; }
+    button.danger { background:#3a2024; border-color:#6b3038; color:#ffd7d7; }
+    button:disabled { opacity:.55; cursor:default; }
+    table { width:100%; border-collapse:collapse; }
+    th, td { padding:12px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; font-size:14px; }
+    th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+    .status { display:inline-flex; align-items:center; gap:8px; font-weight:600; }
+    .dot { width:10px; height:10px; border-radius:50%; background:#789; box-shadow:0 0 0 3px rgba(120,136,153,.15); }
+    .running .dot { background:var(--ok); box-shadow:0 0 0 3px rgba(46,204,113,.15); }
+    .stopped .dot { background:var(--bad); box-shadow:0 0 0 3px rgba(255,107,107,.15); }
+    .failed .dot { background:var(--bad); }
+    .starting .dot, .stopping .dot { background:var(--warn); box-shadow:0 0 0 3px rgba(240,180,41,.15); }
+    .actions { display:flex; gap:6px; flex-wrap:wrap; }
+    .muted { color:var(--muted); font-size:13px; }
+    .err { color:#ff9b9b; font-size:13px; white-space:pre-wrap; }
+    .empty { padding:18px 0; color:var(--muted); }
+    .history { margin-top:10px; padding:10px; background:#0f1925; border:1px solid #30465f; border-radius:8px; }
+    .history h4 { margin:0 0 8px; font-size:13px; color:var(--muted); }
+    .history table th, .history table td { padding:6px 8px; font-size:12px; }
+    .hidden { display:none !important; }
+    @media (max-width: 800px) { th:nth-child(4), td:nth-child(4) { display:none; } header, main { padding-left:16px; padding-right:16px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>NanoRemoteDesktop</h1>
+      <div class="sub">Dashboard de servicios · checks guardados 30 días · solo cambios + heartbeat</div>
+    </div>
+    <div class="row">
+      <div class="tabs">
+        <button class="tab" data-tab="dashboard" onclick="showTab('dashboard')">Dashboard</button>
+        <button class="tab" data-tab="services" onclick="showTab('services')">Servicios</button>
+        <button class="tab" data-tab="system" onclick="showTab('system')">Sistema</button>
+        <button class="tab" data-tab="deploy" onclick="showTab('deploy')">Desplegar</button>
+      </div>
+      <button onclick="refreshActive()">Refrescar</button>
+      <button onclick="logout()">Salir</button>
+    </div>
+  </header>
+  <main>
+    <section class="panel tab-panel" data-tab-panel="dashboard">
+      <h2 style="margin:0 0 14px;font-size:16px">Dashboard</h2>
+      <div class="row" id="stats" style="gap:16px"></div>
+    </section>
+
+    <section class="panel tab-panel" data-tab-panel="services">
+      <h2 style="margin:0 0 14px;font-size:16px">Servicios gestionados</h2>
+      <div id="err" class="err"></div>
+      <div style="overflow:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Servicio</th>
+              <th>Estado</th>
+              <th>Último check</th>
+              <th>Detalle</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+      <div id="empty" class="empty" style="display:none">No hay servicios configurados.</div>
+    </section>
+
+    <section class="panel tab-panel" data-tab-panel="services">
+      <h2 id="formTitle" style="margin:0 0 14px;font-size:16px">Añadir servicio manual</h2>
+      <input id="editId" type="hidden" value="">
+      <div class="row">
+        <label>Nombre del servicio
+          <input id="name" type="text" placeholder="ej. ssh, nginx, Spooler">
+        </label>
+        <label>Etiqueta (opcional)
+          <input id="label" type="text" placeholder="Nombre visible">
+        </label>
+        <label style="flex-direction:row;align-items:center;gap:8px;margin-bottom:2px">
+          <input id="enabled" type="checkbox" checked> Monitorizar
+        </label>
+        <button class="primary" id="saveBtn" onclick="saveService()">Añadir</button>
+        <button id="cancelBtn" onclick="cancelEdit()" style="display:none">Cancelar</button>
+      </div>
+      <div id="addErr" class="err" style="margin-top:10px"></div>
+    </section>
+
+    <section class="panel tab-panel" data-tab-panel="system">
+      <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h2 style="margin:0;font-size:16px">Servicios del sistema</h2>
+        <div class="row">
+          <input id="sysFilter" type="text" placeholder="Filtrar..." oninput="renderSystemServices()" style="min-width:180px">
+          <button onclick="loadSystemServices()">Cargar/Refrescar</button>
+        </div>
+      </div>
+      <div id="sysErr" class="err"></div>
+      <div style="overflow:auto;max-height:420px">
+        <table>
+          <thead>
+            <tr>
+              <th>Servicio</th>
+              <th>Estado</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="sysTbody"></tbody>
+        </table>
+      </div>
+      <div id="sysEmpty" class="empty" style="display:none">No se cargaron servicios del sistema.</div>
+    </section>
+
+    <section class="panel tab-panel" data-tab-panel="deploy">
+      <h2 style="margin:0 0 14px;font-size:16px">Desplegar servicio desde ZIP</h2>
+      <div class="row">
+        <label>Nombre del servicio
+          <input id="depName" type="text" placeholder="ej. mi-servicio">
+        </label>
+        <label>Etiqueta (opcional)
+          <input id="depLabel" type="text" placeholder="Nombre visible">
+        </label>
+        <label>Ejecutable (relativo al ZIP)
+          <input id="depExec" type="text" placeholder="ej. bin/app.exe o app">
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label style="flex:1;min-width:320px">Comando de instalación (opcional)
+          <input id="depInstall" type="text" placeholder="ej. ./install.sh o install.bat" style="width:100%">
+        </label>
+        <label>ZIP
+          <input id="depZip" type="file" accept=".zip">
+        </label>
+        <button class="primary" onclick="deployZip()">Desplegar</button>
+      </div>
+      <div id="depErr" class="err" style="margin-top:10px"></div>
+      <div id="depOut" class="muted" style="margin-top:10px;white-space:pre-wrap"></div>
+    </section>
+  </main>
+
+<script>
+const tbody = document.getElementById('tbody');
+const errEl = document.getElementById('err');
+const emptyEl = document.getElementById('empty');
+let servicesCache = [];
+let systemServicesCache = [];
+let currentTab = 'dashboard';
+let pollTimer = null;
+
+async function api(path, opts={}) {
+  const res = await fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts));
+  if (res.status === 401) { location.href = '/login'; throw new Error('unauthorized'); }
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+  if (!res.ok) throw new Error((data && data.error) || res.status + ' ' + res.statusText);
+  return data;
+}
+
+function fmtTime(epoch) {
+  if (!epoch) return '-';
+  const d = new Date(epoch * 1000);
+  return d.toLocaleString();
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function statusClass(status) {
+  status = (status || 'unknown').toLowerCase();
+  if (['running','active'].includes(status)) return 'running';
+  if (['stopped','inactive','dead'].includes(status)) return 'stopped';
+  if (['failed'].includes(status)) return 'failed';
+  if (['starting','activating','stopping','deactivating'].includes(status)) return 'starting';
+  return '';
+}
+
+async function load() {
+  errEl.textContent = '';
+  try {
+    const services = await api('/api/services');
+    servicesCache = services;
+    renderStats(services);
+    tbody.innerHTML = '';
+    emptyEl.style.display = services.length ? 'none' : 'block';
+    for (const s of services) {
+      const st = s.last_status || 'unknown';
+      const tr = document.createElement('tr');
+      const enabledBadge = s.enabled ? '' : '<span class="muted"> · pausado</span>';
+      tr.innerHTML = `
+        <td><div style="font-weight:600">${esc(s.label || s.name)}${enabledBadge}</div><div class="muted">${esc(s.name)}</div></td>
+        <td><span class="status ${statusClass(st)}"><span class="dot"></span>${esc(st)}</span></td>
+        <td class="muted">${esc(fmtTime(s.last_checked_at))}</td>
+        <td class="muted">${esc(s.last_detail || '')}</td>
+        <td><div class="actions">
+          <button onclick="action(${s.id},'start')">Start</button>
+          <button onclick="action(${s.id},'stop')">Stop</button>
+          <button onclick="action(${s.id},'restart')">Restart</button>
+          <button onclick="action(${s.id},'check')">Check</button>
+          <button onclick="editService(${s.id})">Editar</button>
+          ${s.install_dir ? `<button onclick="showRedeploy(${s.id})">Redeploy</button>` : ''}
+          <button onclick="toggleHistory(${s.id}, this)">Historial</button>
+          <button class="danger" onclick="removeSvc(${s.id}, '${esc(s.name)}')">Eliminar</button>
+        </div>
+        <div id="hist-${s.id}" class="history" style="display:none"></div>
+        <div id="redeploy-${s.id}" class="history" style="display:none"></div></td>`;
+      tbody.appendChild(tr);
+    }
+    renderSystemServices();
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
+}
+
+async function saveService() {
+  const id = document.getElementById('editId').value;
+  const name = document.getElementById('name').value.trim();
+  const label = document.getElementById('label').value.trim();
+  const enabled = document.getElementById('enabled').checked;
+  const addErr = document.getElementById('addErr');
+  addErr.textContent = '';
+  if (!name) { addErr.textContent = 'El nombre del servicio es obligatorio.'; return; }
+  try {
+    if (id) {
+      await api(`/api/services/${id}`, { method: 'PUT', body: JSON.stringify({ name, label: label || null, enabled }) });
+    } else {
+      await api('/api/services', { method: 'POST', body: JSON.stringify({ name, label: label || null, enabled }) });
+    }
+    cancelEdit();
+    await load();
+  } catch (e) { addErr.textContent = e.message; }
+}
+
+function editService(id) {
+  const s = servicesCache.find(x => x.id === id);
+  if (!s) return;
+  document.getElementById('editId').value = s.id;
+  document.getElementById('name').value = s.name || '';
+  document.getElementById('label').value = s.label || '';
+  document.getElementById('enabled').checked = !!s.enabled;
+  document.getElementById('formTitle').textContent = 'Editar servicio';
+  document.getElementById('saveBtn').textContent = 'Guardar';
+  document.getElementById('cancelBtn').style.display = '';
+  document.getElementById('addErr').textContent = '';
+  document.getElementById('name').focus();
+}
+
+function cancelEdit() {
+  document.getElementById('editId').value = '';
+  document.getElementById('name').value = '';
+  document.getElementById('label').value = '';
+  document.getElementById('enabled').checked = true;
+  document.getElementById('formTitle').textContent = 'Añadir servicio';
+  document.getElementById('saveBtn').textContent = 'Añadir';
+  document.getElementById('cancelBtn').style.display = 'none';
+  document.getElementById('addErr').textContent = '';
+}
+
+async function action(id, action) {
+  errEl.textContent = '';
+  try {
+    await api(`/api/services/${id}/action`, { method: 'POST', body: JSON.stringify({ action }) });
+    await load();
+  } catch (e) { errEl.textContent = e.message; }
+}
+
+async function removeSvc(id, name) {
+  if (!confirm(`Eliminar "${name}" del dashboard?`)) return;
+  errEl.textContent = '';
+  try {
+    await api(`/api/services/${id}`, { method: 'DELETE' });
+    await load();
+  } catch (e) { errEl.textContent = e.message; }
+}
+
+async function toggleHistory(id, btn) {
+  const el = document.getElementById('hist-' + id);
+  if (!el) return;
+  if (el.style.display !== 'none') {
+    el.style.display = 'none';
+    btn.textContent = 'Historial';
+    return;
+  }
+  btn.textContent = 'Cargando...';
+  try {
+    const checks = await api(`/api/services/${id}/checks?limit=20`);
+    if (!checks.length) {
+      el.innerHTML = '<div class="muted">Sin historial.</div>';
+    } else {
+      let html = '<h4>Últimos checks</h4><table><thead><tr><th>Fecha</th><th>Estado</th><th>Detalle</th></tr></thead><tbody>';
+      for (const c of checks) {
+        html += `<tr><td class="muted">${esc(fmtTime(c.checked_at))}</td><td><span class="status ${statusClass(c.status)}"><span class="dot"></span>${esc(c.status)}</span></td><td class="muted">${esc(c.detail || '')}</td></tr>`;
+      }
+      html += '</tbody></table>';
+      el.innerHTML = html;
+    }
+    el.style.display = 'block';
+    btn.textContent = 'Ocultar';
+  } catch (e) {
+    errEl.textContent = e.message;
+    btn.textContent = 'Historial';
+  }
+}
+
+function renderStats(services) {
+  const total = services.length;
+  let running = 0, stopped = 0, failed = 0, unknown = 0;
+  for (const s of services) {
+    const st = (s.last_status || 'unknown').toLowerCase();
+    if (['running','active'].includes(st)) running++;
+    else if (['stopped','inactive','dead'].includes(st)) stopped++;
+    else if (st === 'failed') failed++;
+    else unknown++;
+  }
+  const card = (n, label, cls) => `<div style="min-width:120px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:#0f1925"><div class="status ${cls}" style="font-size:22px">${n}</div><div class="muted">${label}</div></div>`;
+  document.getElementById('stats').innerHTML =
+    card(total, 'Gestionados', '') +
+    card(running, 'Running', 'running') +
+    card(stopped, 'Stopped', 'stopped') +
+    card(failed, 'Failed', 'failed') +
+    card(unknown, 'Unknown/otros', '');
+}
+
+async function loadSystemServices() {
+  const err = document.getElementById('sysErr');
+  err.textContent = '';
+  try {
+    systemServicesCache = await api('/api/system-services');
+    renderSystemServices();
+  } catch (e) {
+    err.textContent = e.message;
+  }
+}
+
+function renderSystemServices() {
+  const filter = (document.getElementById('sysFilter').value || '').toLowerCase().trim();
+  const tbody = document.getElementById('sysTbody');
+  const empty = document.getElementById('sysEmpty');
+  const managedNames = new Set(servicesCache.map(s => s.name.toLowerCase()));
+  let list = systemServicesCache.map(s => ({ ...s, managed: managedNames.has(s.name.toLowerCase()) }));
+  if (filter) list = list.filter(s => s.name.toLowerCase().includes(filter) || (s.label||'').toLowerCase().includes(filter));
+  tbody.innerHTML = '';
+  empty.style.display = list.length ? 'none' : 'block';
+  for (const s of list.slice(0, 200)) {
+    const tr = document.createElement('tr');
+    const btn = s.managed
+      ? '<span class="muted">Gestionado</span>'
+      : `<button onclick="addFromSystem('${esc(s.name)}','${esc(s.label || s.name)}')">Añadir</button>`;
+    tr.innerHTML = `
+      <td><div style="font-weight:600">${esc(s.label || s.name)}</div><div class="muted">${esc(s.name)}</div></td>
+      <td><span class="status ${statusClass(s.status)}"><span class="dot"></span>${esc(s.status)}</span></td>
+      <td>${btn}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+async function addFromSystem(name, label) {
+  errEl.textContent = '';
+  try {
+    await api('/api/services', { method: 'POST', body: JSON.stringify({ name, label, enabled: true }) });
+    await load();
+  } catch (e) { errEl.textContent = e.message; }
+}
+
+function showRedeploy(id) {
+  const s = servicesCache.find(x => x.id === id);
+  const el = document.getElementById('redeploy-' + id);
+  if (!el) return;
+  if (el.style.display !== 'none') { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.innerHTML = `
+    <h4>Redeploy / nueva versión</h4>
+    <div class="muted" style="margin-bottom:8px">Hace backup, detiene, reemplaza archivos, ejecuta install cmd opcional y arranca.</div>
+    <div class="row">
+      <label>Ejecutable<input id="rd-exec-${id}" type="text" value="${esc(s?.executable || '')}"></label>
+      <label style="flex:1;min-width:220px">Install cmd<input id="rd-cmd-${id}" type="text" value="${esc(s?.install_cmd || '')}" style="width:100%"></label>
+      <label>ZIP<input id="rd-zip-${id}" type="file" accept=".zip"></label>
+      <button class="primary" onclick="redeploy(${id})">Desplegar versión</button>
+    </div>
+    <div id="rd-err-${id}" class="err" style="margin-top:8px"></div>
+    <div id="rd-out-${id}" class="muted" style="margin-top:8px;white-space:pre-wrap"></div>`;
+}
+
+async function redeploy(id) {
+  const exec = document.getElementById('rd-exec-' + id).value.trim();
+  const cmd = document.getElementById('rd-cmd-' + id).value.trim();
+  const file = document.getElementById('rd-zip-' + id).files[0];
+  const err = document.getElementById('rd-err-' + id);
+  const out = document.getElementById('rd-out-' + id);
+  err.textContent = ''; out.textContent = '';
+  if (!file) { err.textContent = 'ZIP es obligatorio.'; return; }
+  try {
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    const zip_base64 = btoa(bin);
+    const res = await api(`/api/services/${id}/redeploy`, { method: 'POST', body: JSON.stringify({
+      executable: exec || null, install_cmd: cmd || null, zip_base64
+    })});
+    out.textContent = `v${res.version} desplegada. Backup: ${res.backup_dir || '-'}\n${res.install_output || ''}`;
+    await load();
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function deployZip() {
+  const name = document.getElementById('depName').value.trim();
+  const label = document.getElementById('depLabel').value.trim();
+  const executable = document.getElementById('depExec').value.trim();
+  const install_cmd = document.getElementById('depInstall').value.trim();
+  const file = document.getElementById('depZip').files[0];
+  const err = document.getElementById('depErr');
+  const out = document.getElementById('depOut');
+  err.textContent = ''; out.textContent = '';
+  if (!name || !executable || !file) { err.textContent = 'Nombre, ejecutable y ZIP son obligatorios.'; return; }
+  try {
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    const zip_base64 = btoa(bin);
+    const res = await api('/api/deploy', { method: 'POST', body: JSON.stringify({
+      name, label: label || null, executable, install_cmd: install_cmd || null, zip_base64, enabled: true
+    })});
+    out.textContent = 'Desplegado en: ' + (res.install_dir || '') + (res.install_output ? '\n\n' + res.install_output : '');
+    document.getElementById('depName').value = '';
+    document.getElementById('depLabel').value = '';
+    document.getElementById('depExec').value = '';
+    document.getElementById('depInstall').value = '';
+    document.getElementById('depZip').value = '';
+    await load();
+  } catch (e) { err.textContent = e.message; }
+}
+
+function showTab(tab) {
+  currentTab = tab;
+  location.hash = tab;
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('hidden', p.dataset.tabPanel !== tab));
+  refreshActive();
+}
+
+function refreshActive() {
+  if (currentTab === 'dashboard' || currentTab === 'services') load();
+  if (currentTab === 'system') loadSystemServices();
+}
+
+async function logout() {
+  try { await api('/api/logout', { method: 'POST' }); } catch {}
+  location.href = '/login';
+}
+
+const initialTab = (location.hash || '#dashboard').replace('#','');
+showTab(['dashboard','services','system','deploy'].includes(initialTab) ? initialTab : 'dashboard');
+if (pollTimer) clearInterval(pollTimer);
+pollTimer = setInterval(() => { if (currentTab === 'dashboard' || currentTab === 'services') load(); }, 15000);
+</script>
+</body>
+</html>

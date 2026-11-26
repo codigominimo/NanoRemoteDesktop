@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Sistema · NanoRemoteDesktop{% endblock %}
+{% block content %}
+<section class="panel">
+  <div class="panel-header">
+    <h2 class="panel-title">Servicios del sistema</h2>
+    <div class="row">
+      <input id="sysFilter" type="text" placeholder="Filtrar por nombre..." oninput="renderSystemServices()" style="min-width:220px">
+      <button onclick="loadSystemServices()">Cargar / Refrescar</button>
+    </div>
+  </div>
+  <div id="sysErr" class="err"></div>
+  <div class="table-wrap" style="max-height:480px">
+    <table>
+      <thead><tr><th>Servicio</th><th>Estado</th><th style="width:1%"></th></tr></thead>
+      <tbody id="sysTbody"></tbody>
+    </table>
+  </div>
+  <div id="sysEmpty" class="empty">Pulsa "Cargar / Refrescar" para listar servicios del sistema.</div>
+</section>
+{% endblock %}
+{% block scripts %}
+let servicesCache = [];
+let systemServicesCache = [];
+async function loadManaged() { try { servicesCache = await api('/api/services'); } catch(e) {} }
+async function loadSystemServices() {
+  const err = document.getElementById('sysErr'); err.textContent = '';
+  try {
+    await loadManaged();
+    systemServicesCache = await api('/api/system-services');
+    renderSystemServices();
+  } catch(e) { err.textContent = e.message; }
+}
+function renderSystemServices() {
+  const filter = (document.getElementById('sysFilter').value||'').toLowerCase().trim();
+  const tbody = document.getElementById('sysTbody'); const empty = document.getElementById('sysEmpty');
+  const managedNames = new Set(servicesCache.map(s => s.name.toLowerCase()));
+  let list = systemServicesCache.map(s => ({...s, managed: managedNames.has(s.name.toLowerCase())}));
+  if (filter) list = list.filter(s => s.name.toLowerCase().includes(filter) || (s.label||'').toLowerCase().includes(filter));
+  tbody.innerHTML = ''; empty.style.display = list.length ? 'none' : 'block';
+  if (!systemServicesCache.length && !filter) { empty.textContent = 'Pulsa "Cargar / Refrescar" para listar servicios del sistema.'; empty.style.display='block'; return; }
+  empty.textContent = 'No hay resultados.';
+  for (const s of list.slice(0,200)) {
+    const tr = document.createElement('tr');
+    const btn = s.managed ? '<span class="badge badge-muted">Gestionado</span>' : `<button class="btn-sm primary" onclick="addFromSystem('${esc(s.name)}','${esc(s.label||s.name)}')">Añadir</button>`;
+    tr.innerHTML = `<td><div class="svc-name">${esc(s.label||s.name)}</div><div class="muted">${esc(s.name)}</div></td><td><span class="status-pill ${statusClass(s.status)}"><span class="dot"></span>${esc(s.status)}</span></td><td>${btn}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+async function addFromSystem(name, label) {
+  const err = document.getElementById('sysErr'); err.textContent = '';
+  try { await api('/api/services', {method:'POST', body:JSON.stringify({name, label, enabled:true})}); await loadSystemServices(); }
+  catch(e) { err.textContent = e.message; }
+}
+loadSystemServices();
+{% endblock %}

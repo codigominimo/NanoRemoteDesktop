@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · NanoRemoteDesktop{% endblock %}
+{% block content %}
+<section class="panel">
+  <div class="panel-header"><h2 class="panel-title">Resumen</h2></div>
+  <div id="stats" class="stats-grid">{{ stats_html|safe }}</div>
+</section>
+{% endblock %}
+{% block scripts %}
+async function loadStats() {
+  try {
+    const html = await fetch('/fragments/stats', {headers:{'Accept':'text/html'}}).then(r => { if(r.status===401) location.href='/login'; return r.text(); });
+    document.getElementById('stats').innerHTML = html;
+  } catch(e) { console.error(e); }
+}
+setInterval(loadStats, 15000);
+{% endblock %}

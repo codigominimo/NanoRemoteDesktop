@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Desplegar · NanoRemoteDesktop{% endblock %}
+{% block content %}
+<section class="panel">
+  <div class="panel-header"><h2 class="panel-title">Desplegar servicio desde ZIP</h2></div>
+  <div class="row">
+    <label>Nombre del servicio <input id="depName" type="text" placeholder="ej. mi-servicio"></label>
+    <label>Etiqueta (opcional) <input id="depLabel" type="text" placeholder="Nombre visible"></label>
+    <label>Ejecutable (relativo al ZIP) <input id="depExec" type="text" placeholder="ej. bin/app.exe o app"></label>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <label style="flex:1;min-width:280px">Comando de instalación (opcional)
+      <input id="depInstall" type="text" placeholder="ej. ./install.sh o install.bat" style="width:100%">
+    </label>
+    <label>Archivo ZIP <input id="depZip" type="file" accept=".zip"></label>
+    <button class="primary" onclick="deployZip()">Desplegar</button>
+  </div>
+  <div id="depErr" class="err"></div>
+  <div id="depOut" class="muted" style="margin-top:10px;white-space:pre-wrap"></div>
+</section>
+{% endblock %}
+{% block scripts %}
+async function deployZip() {
+  const name = document.getElementById('depName').value.trim();
+  const label = document.getElementById('depLabel').value.trim();
+  const executable = document.getElementById('depExec').value.trim();
+  const install_cmd = document.getElementById('depInstall').value.trim();
+  const file = document.getElementById('depZip').files[0];
+  const err = document.getElementById('depErr'); const out = document.getElementById('depOut');
+  err.textContent = ''; out.textContent = '';
+  if (!name || !executable || !file) { err.textContent = 'Nombre, ejecutable y ZIP son obligatorios.'; return; }
+  try {
+    const buf = await file.arrayBuffer(); const bytes = new Uint8Array(buf);
+    let bin=''; for (let i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
+    const res = await api('/api/deploy', {method:'POST', body:JSON.stringify({name, label:label||null, executable, install_cmd:install_cmd||null, zip_base64:btoa(bin), enabled:true})});
+    out.textContent = 'Desplegado en: ' + (res.install_dir||'') + (res.install_output ? '\n\n'+res.install_output : '');
+    document.getElementById('depName').value=''; document.getElementById('depLabel').value=''; document.getElementById('depExec').value=''; document.getElementById('depInstall').value=''; document.getElementById('depZip').value='';
+  } catch(e) { err.textContent = e.message; }
+}
+{% endblock %}

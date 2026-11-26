@@ -1,0 +1,21 @@
+[package]
+name = "NanoRemoteDesktop"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+askama = { version = "0.16", default-features = false, features = ["derive", "std"] }
+getrandom = "0.3"
+jpeg-encoder = "0.6"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = { version = "0.12", features = ["ssl-rustls"] }
+rcgen = "0.13"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

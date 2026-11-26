@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+{% block title %}Escritorio remoto · NanoRemoteDesktop{% endblock %}
+{% block head %}
+{% if terminal_available %}
+<link rel="stylesheet" href="/assets/xterm.css">
+<style>
+  .term-shell { border:1px solid var(--border); border-radius:10px; overflow:hidden; background:#000; min-height:420px; position:relative; }
+  .term-shell .xterm { height:100%; padding:8px; }
+  .mode-tabs { display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
+  .mode-tab { padding:8px 12px; border:1px solid var(--border); border-radius:8px; background:transparent; color:var(--muted); cursor:pointer; }
+  .mode-tab.active { color:var(--text); background:rgba(255,255,255,.04); }
+</style>
+<script src="/assets/xterm.min.js"></script>
+{% endif %}
+{% endblock %}
+{% block content %}
+<section class="panel" id="remotePanel">
+  <div class="panel-header" id="remoteHeader">
+    <h2 class="panel-title">Acceso remoto</h2>
+    <div class="row">
+      {% if desktop_available %}
+      <button class="primary" id="btnConnectDesktop" onclick="connectDesktop()">Conectar escritorio</button>
+      <button class="ghost" id="btnDisconnectDesktop" onclick="disconnectDesktop()">Desconectar</button>
+      <button class="ghost" onclick="openViewerWindow()">Ventana nueva</button>
+      <button class="ghost" onclick="toggleFullscreen()">Pantalla completa</button>
+      {% endif %}
+      {% if terminal_available %}
+      <button class="primary" id="btnConnectTerm" onclick="connectTerminal()">Conectar terminal</button>
+      <button class="ghost" id="btnDisconnectTerm" onclick="disconnectTerminal()">Desconectar terminal</button>
+      {% endif %}
+    </div>
+  </div>
+  <div class="muted" style="margin-bottom:14px" id="remoteHint">
+    {% if desktop_available %}
+    Escritorio remoto propio. DXGI capture + JPEG delta por tiles (WebSocket). Sin dependencias externas.
+    {% elif terminal_available %}
+    Terminal web por PTY sobre WebSocket. Útil para servidores/headless sin escritorio.
+    {% else %}
+    Este host no tiene backend de escritorio/terminal disponible para esta plataforma.
+    {% endif %}
+  </div>
+  <div id="remoteErr" class="err"></div>
+
+  {% if desktop_available && terminal_available %}
+  <div class="mode-tabs">
+    <button class="mode-tab active" id="tabDesktop" onclick="setMode('desktop')">Escritorio</button>
+    <button class="mode-tab" id="tabTerminal" onclick="setMode('terminal')">Terminal</button>
+  </div>
+  {% endif %}
+
+  {% if desktop_available %}
+  <div id="desktopPane">
+    <div class="row" id="remoteControls" style="margin-bottom:12px;gap:16px;align-items:center;flex-wrap:wrap">
+      <span class="badge badge-muted" id="wsStatus">Desconectado</span>
+      <span class="muted" id="wsInfo">-</span>
+      <label class="muted" style="display:flex;gap:8px;align-items:center">FPS
+        <select id="cfgFps" onchange="sendConfig()" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:4px 8px">
+          <option value="15">15</option><option value="30" selected>30</option><option value="45">45</option><option value="60">60</option>
+        </select>
+      </label>
+      <label class="muted" style="display:flex;gap:8px;align-items:center">Resolución
+        <select id="cfgW" onchange="sendConfig()" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:4px 8px">
+          <option value="854">Baja</option><option value="1280" selected>Media</option><option value="1600">Alta</option><option value="1920">Máx</option>
+        </select>
+      </label>
+      <label class="muted" style="display:flex;gap:8px;align-items:center">Calidad
+        <select id="cfgQ" onchange="sendConfig()" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:4px 8px">
+          <option value="30">Rápida</option><option value="45" selected>Balance</option><option value="65">Nítida</option><option value="80">Máx</option>
+        </select>
+      </label>
+      <label class="muted" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="inputEnabled" checked> Controlar mouse/teclado</label>
+    </div>
+    <div id="viewerWrap" style="border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#000;min-height:420px;display:grid;place-items:center;position:relative;">
+      <button id="fsCloseBtn" onclick="exitFullscreenMode()" title="Salir de pantalla completa" style="display:none;position:absolute;top:10px;right:14px;z-index:50;width:36px;height:36px;border-radius:999px;border:1px solid rgba(255,255,255,.35);background:rgba(0,0,0,.55);color:#fff;font-size:20px;line-height:1;cursor:pointer;backdrop-filter:blur(4px)">×</button>
+      <div id="fsTopHover" style="display:none;position:absolute;top:0;left:0;right:0;height:64px;z-index:40"></div>
+      <canvas id="screenCanvas" tabindex="0" style="max-width:100%;height:auto;display:block;outline:none;cursor:default"></canvas>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if terminal_available %}
+  <div id="terminalPane" style="{% if desktop_available %}display:none{% endif %}">
+    <div class="row" style="margin-bottom:12px;gap:16px;align-items:center;flex-wrap:wrap">
+      <span class="badge badge-muted" id="termStatus">Desconectado</span>
+      <span class="muted" id="termInfo">PTY web terminal</span>
+    </div>
+    <div class="term-shell" id="termShell"><div id="terminal"></div></div>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}
+{% block scripts %}
+{% if desktop_available %}
+let ws = null;
+const canvas = document.getElementById('screenCanvas');
+const ctx = canvas.getContext('2d');
+let frameCount = 0, lastFrameAt = performance.now();
+let pendingTiles = 0; let lastInfoW = 0, lastInfoH = 0;
+function setWsStatus(text, ok) { const el = document.getElementById('wsStatus'); el.textContent = text; el.className = 'badge ' + (ok ? 'badge-ok' : 'badge-muted'); }
+function connectDesktop() {
+  disconnectDesktop();
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/remote`);
+  ws.binaryType = 'arraybuffer';
+  setWsStatus('Conectando...', false);
+  ws.onopen = () => { setWsStatus('Conectado', true); document.getElementById('remoteErr').textContent=''; sendConfig(); canvas.focus(); };
+  ws.onclose = () => setWsStatus('Desconectado', false);
+  ws.onerror = () => { document.getElementById('remoteErr').textContent = 'Error de WebSocket remoto.'; };
+  ws.onmessage = async (ev) => {
+    if (typeof ev.data === 'string') { document.getElementById('wsInfo').textContent = ev.data; return; }
+    const buf = ev.data instanceof ArrayBuffer ? ev.data : await ev.data.arrayBuffer();
+    handleFrame(new Uint8Array(buf));
+  };
+}
+function disconnectDesktop() { if (ws) { try { ws.close(); } catch(_){} ws = null; } setWsStatus('Desconectado', false); }
+function sendConfig() {
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({ t:'cfg', fps:parseInt(document.getElementById('cfgFps').value,10), maxW:parseInt(document.getElementById('cfgW').value,10), q:parseInt(document.getElementById('cfgQ').value,10) }));
+}
+function inputEnabled() { return document.getElementById('inputEnabled').checked && ws && ws.readyState === 1; }
+function normPos(e) { const r = canvas.getBoundingClientRect(); return { x:(e.clientX-r.left)/r.width, y:(e.clientY-r.top)/r.height }; }
+canvas.addEventListener('mousemove', e=>{ if(!inputEnabled())return; const p=normPos(e); ws.send(JSON.stringify({t:'mm',x:p.x,y:p.y})); });
+canvas.addEventListener('mousedown', e=>{ if(!inputEnabled())return; canvas.focus(); const p=normPos(e); ws.send(JSON.stringify({t:'md',x:p.x,y:p.y,b:e.button})); e.preventDefault(); });
+canvas.addEventListener('mouseup', e=>{ if(!inputEnabled())return; const p=normPos(e); ws.send(JSON.stringify({t:'mu',x:p.x,y:p.y,b:e.button})); e.preventDefault(); });
+canvas.addEventListener('wheel', e=>{ if(!inputEnabled())return; ws.send(JSON.stringify({t:'mw',dy:e.deltaY})); e.preventDefault(); }, {passive:false});
+canvas.addEventListener('contextmenu', e=>e.preventDefault());
+canvas.addEventListener('keydown', e=>{ if(!inputEnabled())return; e.preventDefault(); const vk=keyToVk(e); if(vk) ws.send(JSON.stringify({t:'kd',vk})); else if(e.key.length===1) ws.send(JSON.stringify({t:'kd',char:e.key})); });
+canvas.addEventListener('keyup', e=>{ if(!inputEnabled())return; e.preventDefault(); const vk=keyToVk(e); if(vk) ws.send(JSON.stringify({t:'ku',vk})); });
+function keyToVk(e){ const k=e.key; const map={Backspace:8,Tab:9,Enter:13,Shift:16,Control:17,Alt:18,Pause:19,CapsLock:20,Escape:27,Space:32,' ':32,PageUp:33,PageDown:34,End:35,Home:36,ArrowLeft:37,ArrowUp:38,ArrowRight:39,ArrowDown:40,Insert:45,Delete:46,Meta:91,ContextMenu:93}; if(map[k])return map[k]; if(/^F([1-9]|1[0-2])$/.test(k)) return 111+parseInt(k.slice(1),10); if(k.length===1){const c=k.toUpperCase().charCodeAt(0); if((c>=48&&c<=57)||(c>=65&&c<=90))return c;} return 0; }
+function handleFrame(bytes){
+  if (bytes.length < 13) return;
+  const magic = String.fromCharCode(bytes[0],bytes[1],bytes[2],bytes[3]);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const w = dv.getUint16(4,true), h = dv.getUint16(6,true), type = bytes[8], plen = dv.getUint32(9,true);
+  const payload = bytes.slice(13, 13+plen);
+  if (canvas.width!==w || canvas.height!==h) { canvas.width=w; canvas.height=h; }
+  lastInfoW=w; lastInfoH=h;
+  if (magic==='NRD1' && type===4) {
+    const pdv = new DataView(payload.buffer,payload.byteOffset,payload.byteLength);
+    let off=1; off+=2; const count=pdv.getUint16(off,true); off+=2;
+    pendingTiles += count;
+    for (let i=0;i<count;i++){
+      const tx=pdv.getUint16(off,true); off+=2; const ty=pdv.getUint16(off,true); off+=2; off+=4;
+      const tlen=pdv.getUint32(off,true); off+=4; const jpeg=payload.slice(off,off+tlen); off+=tlen;
+      createImageBitmap(new Blob([jpeg],{type:'image/jpeg'})).then(bmp=>{ ctx.drawImage(bmp,tx,ty); bmp.close?.(); pendingTiles--; if(pendingTiles<=0){pendingTiles=0;bumpFps();} }).catch(()=>{ pendingTiles--; if(pendingTiles<=0){pendingTiles=0;bumpFps();} });
+    }
+    if (count===0) bumpFps();
+  }
+}
+function bumpFps(){ frameCount++; const now=performance.now(); if(now-lastFrameAt>1000){ const fps=(frameCount*1000/(now-lastFrameAt)).toFixed(1); document.getElementById('wsInfo').textContent=`${lastInfoW}x${lastInfoH} · ${fps} fps`; frameCount=0; lastFrameAt=now; } }
+function openViewerWindow() {
+  const w = window.open('', '_blank', 'noopener,noreferrer,width=1280,height=720');
+  if (!w) { document.getElementById('remoteErr').textContent = 'El navegador bloqueó la ventana nueva.'; return; }
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Escritorio remoto</title>
+  <style>html,body{margin:0;height:100%;background:#000;overflow:hidden}#wrap{position:relative;width:100%;height:100%;display:grid;place-items:center}
+  #c{max-width:100%;max-height:100%;display:block;outline:none}#x{display:none;position:absolute;top:10px;right:14px;z-index:50;width:36px;height:36px;border-radius:999px;border:1px solid rgba(255,255,255,.35);background:rgba(0,0,0,.55);color:#fff;font-size:20px;cursor:pointer}
+  #top{display:none;position:absolute;top:0;left:0;right:0;height:64px;z-index:40}</style></head>
+  <body><div id="wrap"><div id="top"></div><button id="x" onclick="document.exitFullscreen&&document.exitFullscreen()">×</button><canvas id="c" tabindex="0"></canvas></div>
+  <script>
+  const src=window.opener; const c=document.getElementById('c'); const x=document.getElementById('x'); const top=document.getElementById('top');
+  function draw(){ try{ if(src&&src.canvas){ c.width=src.canvas.width; c.height=src.canvas.height; c.getContext('2d').drawImage(src.canvas,0,0); } }catch(e){} requestAnimationFrame(draw); }
+  draw();
+  function norm(e){ const r=c.getBoundingClientRect(); return {x:(e.clientX-r.left)/r.width,y:(e.clientY-r.top)/r.height}; }
+  function send(o){ try{ if(src&&src.ws&&src.ws.readyState===1 && src.inputEnabled && src.inputEnabled()) src.ws.send(JSON.stringify(o)); }catch(e){} }
+  c.addEventListener('mousemove',e=>{const p=norm(e); send({t:'mm',x:p.x,y:p.y});});
+  c.addEventListener('mousedown',e=>{c.focus(); const p=norm(e); send({t:'md',x:p.x,y:p.y,b:e.button}); e.preventDefault();});
+  c.addEventListener('mouseup',e=>{const p=norm(e); send({t:'mu',x:p.x,y:p.y,b:e.button}); e.preventDefault();});
+  c.addEventListener('wheel',e=>{send({t:'mw',dy:e.deltaY}); e.preventDefault();},{passive:false});
+  c.addEventListener('contextmenu',e=>e.preventDefault());
+  c.addEventListener('keydown',e=>{e.preventDefault(); try{const vk=src.keyToVk(e); if(vk) send({t:'kd',vk}); else if(e.key.length===1) send({t:'kd',char:e.key});}catch(_){} });
+  c.addEventListener('keyup',e=>{e.preventDefault(); try{const vk=src.keyToVk(e); if(vk) send({t:'ku',vk});}catch(_){} });
+  document.addEventListener('mousemove',e=>{ const fs=document.fullscreenElement; if(!fs){x.style.display='none';top.style.display='none';return;} top.style.display='block'; x.style.display = e.clientY < 64 ? 'block':'none'; });
+  document.addEventListener('fullscreenchange',()=>{ if(!document.fullscreenElement){x.style.display='none';top.style.display='none';} });
+  c.addEventListener('dblclick',()=>{ if(!document.fullscreenElement) document.documentElement.requestFullscreen?.(); else document.exitFullscreen?.(); });
+  <\/script></body></html>`);
+  w.document.close();
+}
+function toggleFullscreen() { const wrap=document.getElementById('viewerWrap'); if(!document.fullscreenElement){ wrap.requestFullscreen?.().catch(()=>{}); } else { exitFullscreenMode(); } }
+function exitFullscreenMode(){ if(document.fullscreenElement) document.exitFullscreen?.().catch(()=>{}); }
+const fsCloseBtn=document.getElementById('fsCloseBtn'); const fsTopHover=document.getElementById('fsTopHover');
+document.addEventListener('mousemove', (e)=>{ const inFs=!!document.fullscreenElement; fsTopHover.style.display=inFs?'block':'none'; fsCloseBtn.style.display=(inFs&&e.clientY<64)?'block':'none'; });
+document.addEventListener('fullscreenchange', ()=>{ const inFs=!!document.fullscreenElement; fsTopHover.style.display=inFs?'block':'none'; if(!inFs) fsCloseBtn.style.display='none'; const wrap=document.getElementById('viewerWrap'); wrap.style.minHeight=inFs?'100vh':'420px'; wrap.style.borderRadius=inFs?'0':'10px'; canvas.style.maxWidth=inFs?'100vw':'100%'; canvas.style.maxHeight=inFs?'100vh':''; canvas.style.width=inFs?'100vw':''; canvas.style.height=inFs?'100vh':'auto'; canvas.style.objectFit=inFs?'contain':''; });
+{% endif %}
+
+{% if terminal_available %}
+let termWs = null; let term = null;
+function setTermStatus(text, ok){ const el=document.getElementById('termStatus'); el.textContent=text; el.className='badge ' + (ok?'badge-ok':'badge-muted'); }
+function ensureTerm(){
+  if (term) return term;
+  term = new Terminal({cursorBlink:true, fontSize:14, theme:{background:'#000000'}});
+  term.open(document.getElementById('terminal'));
+  term.onData(data => { if(termWs && termWs.readyState===1) termWs.send(JSON.stringify({t:'i', d:data})); });
+  window.addEventListener('resize', fitTerm);
+  setTimeout(fitTerm, 50);
+  return term;
+}
+function fitTerm(){
+  if(!term) return;
+  const shell=document.getElementById('termShell');
+  const cols = Math.max(20, Math.floor((shell.clientWidth-16)/9));
+  const rows = Math.max(10, Math.floor((shell.clientHeight-16)/18));
+  try { term.resize(cols, rows); } catch(_) {}
+  if(termWs && termWs.readyState===1) termWs.send(JSON.stringify({t:'r', c:cols, r:rows}));
+}
+function connectTerminal(){
+  disconnectTerminal(); ensureTerm();
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  termWs = new WebSocket(`${proto}://${location.host}/ws/terminal`);
+  termWs.binaryType = 'arraybuffer';
+  setTermStatus('Conectando...', false);
+  termWs.onopen = () => { setTermStatus('Conectado', true); fitTerm(); term.focus(); };
+  termWs.onclose = () => setTermStatus('Desconectado', false);
+  termWs.onerror = () => { document.getElementById('remoteErr').textContent = 'Error de WebSocket terminal.'; };
+  termWs.onmessage = async (ev) => {
+    if (typeof ev.data === 'string') { term.write(ev.data); return; }
+    const buf = ev.data instanceof ArrayBuffer ? ev.data : await ev.data.arrayBuffer();
+    term.write(new Uint8Array(buf));
+  };
+}
+function disconnectTerminal(){ if(termWs){ try{termWs.close();}catch(_){} termWs=null; } setTermStatus('Desconectado', false); }
+{% endif %}
+
+{% if desktop_available && terminal_available %}
+function setMode(mode){
+  const d = document.getElementById('desktopPane'); const t = document.getElementById('terminalPane');
+  document.getElementById('tabDesktop').classList.toggle('active', mode==='desktop');
+  document.getElementById('tabTerminal').classList.toggle('active', mode==='terminal');
+  d.style.display = mode==='desktop' ? '' : 'none';
+  t.style.display = mode==='terminal' ? '' : 'none';
+  if(mode==='terminal'){ ensureTerm(); setTimeout(fitTerm,50); }
+}
+{% endif %}
+{% endblock %}
+
