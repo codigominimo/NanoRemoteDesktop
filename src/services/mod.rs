@@ -29,7 +29,7 @@ pub trait ServiceManager: Send + Sync {
 pub fn create_manager() -> Box<dyn ServiceManager> {
     #[cfg(target_os = "linux")]
     {
-        Box::new(linux::LinuxServiceManager)
+        Box::new(linux::LinuxServiceManager::new())
     }
     #[cfg(target_os = "windows")]
     {

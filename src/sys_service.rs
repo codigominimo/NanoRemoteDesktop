@@ -43,6 +43,7 @@ WantedBy=multi-user.target\n",
 #[cfg(target_os = "linux")]
 pub fn uninstall(_config: &Config) -> Result<(), String> {
     use std::fs;
+    use std::path::PathBuf;
     let unit_path = PathBuf::from("/etc/systemd/system/nanoremotedesktop.service");
     let _ = run_cmd(
         "systemctl",
